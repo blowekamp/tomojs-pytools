@@ -50,10 +50,49 @@ class HedwigZarrImage:
 
     def rechunk(self, chunk_size: int) -> None:
         """
-        Change the chunk size of each ZARR array in the pyramid.
+        Change the chunk size of each ZARR array inplace in the pyramid.
+
+        The chunk_size is applied to all spacial dimension, and other dimension (CT) are the full size.
+
+        The ImageZarrImage need write access to the ZARR.
         """
 
-        return self._rechunk_group(chunk_size)
+        logger.info(f'Processing group: "{self.zarr_group.name}"...')
+        logger.debug(self.zarr_group)
+
+        # grok through the OME-NGFF meta-dat, for each image scale (dataset/array) with axes information
+        # https://ngff.openmicroscopy.org/latest/#multiscale-md
+        image = self._ome_ngff_multiscales()
+
+        chunk_request = tuple(chunk_size if a["type"] == "space" else -1 for a in image["axes"])
+
+        for dataset in image["datasets"]:
+            arr = self.zarr_group[dataset["path"]]
+            arr_name = arr.name
+            logger.info(f'Processing array: "{arr.name}"...')
+            logger.debug(arr.info)
+
+            chunks = tuple(self._chunk_logic_dim(r, s) for r, s in zip(chunk_request, arr.shape))
+            if arr.chunks == chunks:
+                logger.info("Chunks already requested size")
+                continue
+
+            # copy array to a temp zarr array on file
+            zarr.copy(
+                arr,
+                self.zarr_group,
+                name=arr_name + ".temp",
+                chunks=chunks,
+                compressor=arr.compressor,
+                dimension_separator=arr._dimension_separator,
+                filters=arr.filters,
+                overwrite=False,
+            )
+
+            logger.debug(self.zarr_group[dataset["path"] + ".temp"].info)
+            logger.debug(f"replace: {self.zarr_group[dataset['path'] + '.temp'].name} -> {arr_name}")
+            del self.zarr_group[dataset["path"]]
+            self.zarr_group.store.rename(self.zarr_group[dataset["path"] + ".temp"].name, arr_name)
 
     def extract_2d(
         self,
@@ -173,43 +212,6 @@ class HedwigZarrImage:
         if dshape > drequest > 0:
             return drequest
         return dshape
-
-    def _rechunk_group(self, chunk_size: int):
-        logger.info(f'Processing group: "{self.zarr_group.name}"...')
-        logger.debug(self.zarr_group)
-
-        # grok through the OME-NGFF meta-dat, for each image scale (dataset/array) with axes information
-        # https://ngff.openmicroscopy.org/latest/#multiscale-md
-        for image in self._ome_ngff_multiscales():
-            chunk_request = tuple(chunk_size if a["type"] == "space" else -1 for a in image["axes"])
-
-            for dataset in image["datasets"]:
-                arr = self.zarr_group[dataset["path"]]
-                arr_name = arr.name
-                logger.info(f'Processing array: "{arr.name}"...')
-                logger.debug(arr.info)
-
-                chunks = tuple(self._chunk_logic_dim(r, s) for r, s in zip(chunk_request, arr.shape))
-                if arr.chunks == chunks:
-                    logger.info("Chunks already requested size")
-                    continue
-
-                # copy array to a temp zarr array on file
-                zarr.copy(
-                    arr,
-                    self.zarr_group,
-                    name=arr_name + ".temp",
-                    chunks=chunks,
-                    compressor=arr.compressor,
-                    dimension_separator=arr._dimension_separator,
-                    filters=arr.filters,
-                    overwrite=False,
-                )
-
-                logger.debug(self.zarr_group[dataset["path"] + ".temp"].info)
-                logger.debug(f"replace: {self.zarr_group[dataset['path'] + '.temp'].name} -> {arr_name}")
-                del self.zarr_group[dataset["path"]]
-                self.zarr_group.store.rename(self.zarr_group[dataset["path"] + ".temp"].name, arr_name)
 
     def _visual_min_max(self, mad_scale: float, clamp: bool = True, channel=None) -> Dict[str, List[int]]:
         """Processes the full resolution Zarr image. Dask is used for parallel reading and statistics computation. The

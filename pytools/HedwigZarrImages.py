@@ -15,7 +15,7 @@ class HedwigZarrImages:
     Represents the set of images in a OME-NGFF ZARR structure.
     """
 
-    def __init__(self, zarr_path: Path):
+    def __init__(self, zarr_path: Path, read_only=True):
         """
         Initialized by the path to a root of an OME zarr structure.
         """
@@ -23,7 +23,7 @@ class HedwigZarrImages:
         assert zarr_path.exists()
         assert zarr_path.is_dir()
         self.zarr_store = zarr.DirectoryStore(zarr_path)
-        self.zarr_root = zarr.Group(store=self.zarr_store, read_only=True)
+        self.zarr_root = zarr.Group(store=self.zarr_store, read_only=read_only)
 
     @property
     def ome_xml_path(self) -> Optional[Path]:
