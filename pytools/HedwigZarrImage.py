@@ -2,9 +2,8 @@ from pathlib import Path
 
 import SimpleITK as sitk
 import zarr
-from typing import Optional, Tuple, Union, Dict, List
+from typing import Optional, Tuple, Dict, List
 from pytools.utils.xml_info import OMEInfo
-from pytools.zarr_extract_2d import zarr_extract_2d
 import logging
 import math
 import re
@@ -46,7 +45,7 @@ class HedwigZarrImage:
     @property
     def shape(self) -> Tuple[int]:
         """The size of the dimensions of the full resolution image."""
-        return self._ome_ngff_multiscale_image(0).shape
+        return self._ome_ngff_multiscale_get_array(0).shape
 
     def rechunk(self, chunk_size: int) -> None:
         """
@@ -95,12 +94,7 @@ class HedwigZarrImage:
             self.zarr_group.store.rename(self.zarr_group[dataset["path"] + ".temp"].name, arr_name)
 
     def extract_2d(
-        self,
-        target_size_x: int,
-        target_size_y: int,
-        *,
-        size_factor: float = 1.5,
-        output_filename: Union[Path, str, None] = None,
+        self, target_size_x: int, target_size_y: int, *, size_factor: float = 1.5, auto_uint8: bool = False
     ) -> Optional[sitk.Image]:
         """Extracts a 2D image from an OME-NGFF pyramid structured with ZARR array that is 2D-like.
 
@@ -118,18 +112,60 @@ class HedwigZarrImage:
         used to write the file may place additional contains on the image which can be written. Such as JPEG only
         supporting uint8 pixel types and 1, 3, or 4 components.
 
-        :param input_zarr: The path to an OME-NGFF structured ZARR array.
         :param target_size_x: The target size of the extracted subvolume in the x dimension.
         :param target_size_y: The target size of the extracted subvolume in the y dimension.
         :param size_factor: The size of the subvolume to extract will be increased by this factor so that the
             extracted subvolume can have antialiasing applied to it.
-        :param output_filename: If not None then the extracted subvolume will be written to this file.
+        :param auto_uint8: If True the output image will be automatically linearly shifted and scaled to fit into uint8
+            component pixel types.
         :return: The extracted subvolume as a SimpleITK image.
 
         """
-        return zarr_extract_2d(
-            self.path, target_size_x, target_size_y, size_factor=size_factor, output_filename=output_filename
-        )
+
+        source_axes_names = self._ome_ngff_multiscale_dims()
+        assert source_axes_names == "TCZYX"
+        if self.shape[0] > 1:
+            raise ValueError(f"Time dimension has more than one element: {self.shape[0]}")
+        is_vector = self.shape[1] > 1
+        if self.shape[2] > 1:
+            raise ValueError(f"Z dimension has more than one element: {self.shape[2]}")
+
+        target_axes_names = [n for n in "tzyxc" if n in source_axes_names]
+        logger.debug(f"source_axes: {source_axes_names} target_axes: {target_axes_names}")
+
+        zarr_request_size = [1, 0, 1, target_size_y * size_factor, target_size_x * size_factor]
+
+        arr = self._ome_ngff_get_array_from_size(zarr_request_size)
+        logger.debug(arr.info)
+
+        arr = dask.array.from_zarr(arr.astype(arr.dtype.newbyteorder("=")))
+        if is_vector:
+            arr = dask.array.squeeze(arr, axis=(0, 2))  # Output CYX
+            arr = dask.array.moveaxis(arr, 0, -1)  # transpose to YXC
+        else:
+            arr = dask.array.squeeze(arr, axis=(0, 1, 2))
+
+        img = sitk.GetImageFromArray(arr.compute(), isVector=is_vector)
+
+        logger.debug(img)
+
+        logger.debug(f"resizing image of: {img.GetSize()} -> {(target_size_x, target_size_y)}")
+        img = sitk.utilities.resize(img, (target_size_x, target_size_y), interpolator=sitk.sitkLinear, fill=False)
+
+        if auto_uint8:
+            if is_vector:
+                img.ToScalarImage(True)
+
+            min_max = sitk.MinimumMaximum(img)
+
+            logger.debug(f"Adjusting output pixel intensity range from {min_max} -> {(0, 255)}.")
+
+            img = sitk.ShiftScale(img, -min_max[0], 255.0 / (min_max[1] - min_max[0]), sitk.sitkUInt8)
+
+            if is_vector:
+                img.ToVectorImage(True)
+
+        return img
 
     @property
     def shader_type(
@@ -198,14 +234,35 @@ class HedwigZarrImage:
     def _ome_ngff_multiscales(self, idx=0):
         return self.zarr_group.attrs["multiscales"][idx]
 
-    def _ome_ngff_multiscale_image(self, level, idx=0):
-        return self.zarr_group[self._ome_ngff_multiscales(idx)["datasets"][0]["path"]]
+    def _ome_ngff_multiscale_get_array(self, level, idx=0) -> zarr.Array:
+        return self.zarr_group[self._ome_ngff_multiscales(idx)["datasets"][level]["path"]]
 
     def _ome_ngff_multiscale_dims(self):
         dims = ""
         for ax in self._ome_ngff_multiscales()["axes"]:
             dims += ax["name"].upper()
         return dims
+
+    def _ome_ngff_get_array_from_size(self, target_size: List[int]) -> zarr.Array:
+        """Returns the smallest array in the OME-NGFF pyramid structured ZARR array that is larger than the target size.
+
+        :param target_size: The target size of the array to return.
+        :return: The smallest array in the OME-NGFF pyramid structured ZARR array that is larger than the target size.
+        """
+
+        for dataset in reversed(self._ome_ngff_multiscales(idx=0)["datasets"]):
+            level_path = dataset["path"]
+
+            arr = self.zarr_group[level_path]
+
+            if any([s > t for s, t in zip(arr.shape, target_size) if t > 0]):
+                return self.zarr_group[level_path]
+
+        logger.warning(
+            f"Could not find an array in the OME-NGFF pyramid structured ZARR array that is larger"
+            f" than the target size: {target_size}"
+        )
+        return self.zarr_group[self._ome_ngff_multiscales(idx=0)["datasets"][0]["path"]]
 
     @staticmethod
     def _chunk_logic_dim(drequest: int, dshape: int) -> int:
@@ -232,16 +289,16 @@ class HedwigZarrImage:
 
         """
 
-        logger.debug(f"path: {self._ome_ngff_multiscale_image(0).path}")
+        logger.debug(f"path: {self._ome_ngff_multiscale_get_array(0).path}")
 
         # extract channel
         assert self._ome_ngff_multiscale_dims()[1] == "C"
         if channel is not None:
             logger.info(f"Extracting channel {channel}..")
-            da = dask.array.from_zarr(self._ome_ngff_multiscale_image(0))
+            da = dask.array.from_zarr(self._ome_ngff_multiscale_get_array(0))
             da = da[:, channel, ...]
         else:
-            da = dask.array.from_zarr(self._ome_ngff_multiscale_image(0))
+            da = dask.array.from_zarr(self._ome_ngff_multiscale_get_array(0))
 
         histo = DaskHistogramHelper(da)
 

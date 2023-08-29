@@ -21,7 +21,7 @@ from pytools.HedwigZarrImages import HedwigZarrImages
 def main(input_zarr, log_level, chunk_size):
     logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.getLevelName(log_level))
 
-    z = HedwigZarrImages(input_zarr)
+    z = HedwigZarrImages(input_zarr, read_only=False)
 
     for k in z.get_series_keys():
         z[k].rechunk(chunk_size)
