@@ -28,33 +28,33 @@ def main(input_zarr, log_level, show):
 
     print(zi.ome_xml_path)
 
-    for k in zi.get_series_keys():
-        z_img = zi[k]
+    for k, hz_img in zi.series():
+        hz_img = zi[k]
         print(f'image name: "{k}"')
-        for level in range(len(z_img._ome_ngff_multiscales(idx=0)["datasets"])):
-            arr = z_img._ome_ngff_multiscale_get_array(level)
-            print(f"\tarray level {level}: {arr} {arr.nchunks} chunks of {arr.chunks} ")
-        print(f"\tzarr path: {z_img.path}")
-        print(f"\tdims: {z_img.dims}")
-        print(f"\tshader type: {z_img.shader_type}")
-        print(f"\tNGFF dims: {z_img._ome_ngff_multiscale_dims()}")
+        for level in range(len(hz_img._ome_ngff_multiscales(idx=0)["datasets"])):
+            arr = hz_img._ome_ngff_multiscale_get_array(level)
+            print(f"\tarray level {level}: {arr} {arr.nchunks} chunks of {arr.chunks}")
+        print(f"\tzarr path: {hz_img.path}")
+        print(f"\tdims: {hz_img.dims}")
+        print(f"\tshader type: {hz_img.shader_type}")
+        print(f"\tNGFF dims: {hz_img._ome_ngff_multiscale_dims()}")
 
         if show:
             viewer = sitk.ImageViewer()
-            if z_img.shader_type == "RGB":
-                img = z_img.extract_2d(1024, 1024, auto_uint8=True)
+            if hz_img.shader_type == "RGB":
+                img = hz_img.extract_2d(1024, 1024, auto_uint8=True)
                 # rotate label images counterclockwise by 90 degrees.
                 if k == "label image":
                     img = sitk.Flip(sitk.PermuteAxes(img, [1, 0]), [True, False])
-            elif z_img.shader_type == "MultiChannel":
-                img = z_img.extract_2d(1024, 1024)
+            elif hz_img.shader_type == "MultiChannel":
+                img = hz_img.extract_2d(1024, 1024)
                 viewer.SetFileExtension(".nii")
             else:
-                img = z_img.extract_2d(1024, 1024)
+                img = hz_img.extract_2d(1024, 1024)
 
             viewer.Execute(img)
 
-        print(f"\tshader params: {z_img.neuroglancer_shader_parameters()}")
+        print(f"\tshader params: {hz_img.neuroglancer_shader_parameters()}")
 
 
 if __name__ == "__main__":
