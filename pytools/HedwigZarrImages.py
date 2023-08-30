@@ -1,3 +1,16 @@
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0.txt
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
 from pathlib import Path
 
 import zarr
@@ -24,6 +37,7 @@ class HedwigZarrImages:
         assert zarr_path.is_dir()
         self.zarr_store = zarr.DirectoryStore(zarr_path)
         self.zarr_root = zarr.Group(store=self.zarr_store, read_only=read_only)
+        self._ome_info = None
 
     @property
     def ome_xml_path(self) -> Optional[Path]:
@@ -41,7 +55,7 @@ class HedwigZarrImages:
     def ome_info(self) -> Optional[AnyStr]:
         """Returns OME XML as string is if exists."""
 
-        if hasattr(self, "_ome_info"):
+        if self._ome_info is not None:
             return self._ome_info
 
         _path = self.ome_xml_path
@@ -53,7 +67,7 @@ class HedwigZarrImages:
 
     def get_series_keys(self) -> Iterable[str]:
         """
-        Will return an iterable of strings of the names or labels of the images. Will be extracted from
+        Returns an iterable of strings of the names or labels of the images. Will be extracted from
         the OME-XML if available otherwise the ZARR group names.
         e.g. "label_image"
         """
@@ -73,5 +87,6 @@ class HedwigZarrImages:
         return HedwigZarrImage(self.zarr_root[item])
 
     def series(self) -> Iterable[Tuple[str, HedwigZarrImage]]:
+        """An Iterable of key and HedwigZarrImages stored in the ZARR structure."""
         for k in self.get_series_keys():
             yield k, self[k]
