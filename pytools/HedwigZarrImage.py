@@ -1,8 +1,21 @@
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#         http://www.apache.org/licenses/LICENSE-2.0.txt
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
 from pathlib import Path
 
 import SimpleITK as sitk
 import zarr
-from typing import Optional, Tuple, Dict, List
+from typing import Tuple, Dict, List
 from pytools.utils.xml_info import OMEInfo
 import logging
 import math
@@ -16,6 +29,8 @@ logger = logging.getLogger(__name__)
 class HedwigZarrImage:
     """
     Represents a OME-NGFF Zarr pyramidal image.
+
+    The member provide information useful for the Hedwig imaging pipelines.
     """
 
     def __init__(self, zarr_grp: zarr.Group, _ome_info: OMEInfo, _ome_idx: int):
@@ -35,16 +50,21 @@ class HedwigZarrImage:
     @property
     def dims(self) -> str:
         """
-        The used dimension of the image XY, XYC, XYZCT etc.
+        The Hedwig dimension of the image XY, XYC, XYZCT etc.
 
         Collapses ZCT dimensions if of size 1.
+
+        Note: this is the reverse order of axis for numpy/zarr/dask.
         """
         dims = [d for s, d in zip(self.shape, self._ome_ngff_multiscale_dims()) if d in "XY" or s > 1]
         return "".join(dims[::-1])
 
     @property
     def shape(self) -> Tuple[int]:
-        """The size of the dimensions of the full resolution image."""
+        """The size of the dimensions of the full resolution image.
+
+        This is in numpy/zarr/dask order.
+        """
         return self._ome_ngff_multiscale_get_array(0).shape
 
     def rechunk(self, chunk_size: int) -> None:
@@ -95,8 +115,8 @@ class HedwigZarrImage:
 
     def extract_2d(
         self, target_size_x: int, target_size_y: int, *, size_factor: float = 1.5, auto_uint8: bool = False
-    ) -> Optional[sitk.Image]:
-        """Extracts a 2D image from an OME-NGFF pyramid structured with ZARR array that is 2D-like.
+    ) -> sitk.Image:
+        """Extracts a 2D SimpleITK Image from an OME-NGFF pyramid structured with ZARR array that is 2D-like.
 
         The OME-NGFF pyramid structured ZARR array is assumed to have the following structure:
             - The axes spacial dimensions must be labeled as "X", "Y", and optionally "Z".
@@ -106,11 +126,7 @@ class HedwigZarrImage:
 
         The extracted subvolume will be resized to the target size while maintaining the aspect ratio.
 
-        The resized extracted subvolume with be the sample pixel type as the OME-NGFF pyramid structured ZARR array.
-
-        If output_filename is not None then the extracted subvolume will be written to this file. The output ITK ImageIO
-        used to write the file may place additional contains on the image which can be written. Such as JPEG only
-        supporting uint8 pixel types and 1, 3, or 4 components.
+        The resized extracted subvolume with be the same pixel type as the OME-NGFF pyramid structured ZARR array.
 
         :param target_size_x: The target size of the extracted subvolume in the x dimension.
         :param target_size_y: The target size of the extracted subvolume in the y dimension.
@@ -189,7 +205,7 @@ class HedwigZarrImage:
         if _shader_type == "RGB":
             return {}
         if _shader_type == "Grayscale":
-            stats = self._visual_min_max(mad_scale=5, clamp=True, channel=None)
+            stats = self._image_statistics(channel=None)
             window = (stats["median"] - stats["mad"] * mad_scale, stats["median"] + stats["mad"] * mad_scale)
             window = (max(window[0], stats["min"]), min(window[1], stats["max"]))
             return {
@@ -211,7 +227,7 @@ class HedwigZarrImage:
                 # replace non-alpha numeric with a underscore
                 name = re.sub(r"[^a-zA-Z0-9]+", "_", c_name.lower())
 
-                stats = self._visual_min_max(mad_scale=5, clamp=True, channel=c)
+                stats = self._image_statistics(mad_scale=5, clamp=True, channel=c)
                 window = (stats["median"] - stats["mad"] * mad_scale, stats["median"] + stats["mad"] * mad_scale)
                 window = (max(window[0], stats["min"]), min(window[1], stats["max"]))
 
@@ -232,19 +248,26 @@ class HedwigZarrImage:
         raise RuntimeError(f'Unknown shader type: "{self.shader_type}"')
 
     def _ome_ngff_multiscales(self, idx=0):
+        """Get OME NGFF multiscale metadata"""
         return self.zarr_group.attrs["multiscales"][idx]
 
     def _ome_ngff_multiscale_get_array(self, level, idx=0) -> zarr.Array:
+        """Get array at multiscale level"""
         return self.zarr_group[self._ome_ngff_multiscales(idx)["datasets"][level]["path"]]
 
     def _ome_ngff_multiscale_dims(self):
+        """ZARR order dimension name in uppercase
+
+        Expected to be "TCZYX".
+        """
         dims = ""
         for ax in self._ome_ngff_multiscales()["axes"]:
             dims += ax["name"].upper()
         return dims
 
     def _ome_ngff_get_array_from_size(self, target_size: List[int]) -> zarr.Array:
-        """Returns the smallest array in the OME-NGFF pyramid structured ZARR array that is larger than the target size.
+        """Returns the smallest array in the OME-NGFF pyramid structured ZARR array that is larger than the target sizes
+        in all dimensions.
 
         :param target_size: The target size of the array to return.
         :return: The smallest array in the OME-NGFF pyramid structured ZARR array that is larger than the target size.
@@ -270,22 +293,20 @@ class HedwigZarrImage:
             return drequest
         return dshape
 
-    def _visual_min_max(self, mad_scale: float, clamp: bool = True, channel=None) -> Dict[str, List[int]]:
+    def _image_statistics(self, channel=None) -> Dict[str, List[int]]:
         """Processes the full resolution Zarr image. Dask is used for parallel reading and statistics computation. The
          global scheduler is used for all operations which can be changed with standard Dask configurations.
 
-        :param mad_scale: The scale factor for the robust median absolute deviation (MAD) about the median to produce
-         the "window range."
+        :param channel: The index of the channel to perform calculation on
 
-        :param clamp: If True then the minimum and maximum range will be clamped to the computed floor and limit values.
-
-
-        :returns: The resulting dictionary will contain the following data elements with integer values:
-        {
-          "window": [ -571, 370 ],
-          "range" : [ -53, 58]
-        }
-        Range is the minimum and maximum value in the dataset.
+        :returns: The resulting dictionary will contain the following data elements:
+            "min",
+            "max",
+            "median",
+            "mad",
+            "mean",
+            "var",
+            "sigma"
 
         """
 
