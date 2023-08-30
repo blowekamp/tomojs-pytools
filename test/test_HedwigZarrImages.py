@@ -13,34 +13,23 @@
 #
 
 from pytools.HedwigZarrImages import HedwigZarrImages
-from pathlib import Path
 import pytest
 
 import json
 
 
-zarr_path = Path("/Users/blowekamp/scratch/hedwig/TestData/3D/CryoTomo/SARsCoV2_1.zarr")
-
-
 @pytest.mark.parametrize(
-    "zarr_path",
-    [
-        Path(
-            "/Users/blowekamp/scratch/hedwig/TestData/Nanostringfiles/Example IHC images from Axio/"
-            "2023_03_10_P2_S8_FL.zarr"
-        ),
-        Path("/Users/blowekamp/scratch/hedwig/TestData/3D/CryoTomo/SARsCoV2_1.zarr"),
-    ],
+    "zarr_name",
+    ["2013-1220-dA30_5-BSC-1_22_full_rec.zarr", "OM_P1_S1_ScanOnly_1k.zarr"],
 )
-def test_HedwigZarrImage_gray(zarr_path):
-    zi = HedwigZarrImages(zarr_path)
+def test_HedwigZarrImage_info(data_path, zarr_name):
+    zi = HedwigZarrImages(data_path / zarr_name)
     keys = list(zi.get_series_keys())
     print(f"zarr groups: {keys}")
 
     print(zi.ome_xml_path)
 
-    for k in zi.get_series_keys():
-        z_img = zi[k]
+    for k, z_img in zi.series():
         print(f'image name: "{k}"')
         print(f"\tarray shape: {z_img.shape}")
         print(f"\tzarr path: {z_img.path}")
@@ -48,4 +37,3 @@ def test_HedwigZarrImage_gray(zarr_path):
         print(f"\tshader type: {z_img.shader_type}")
         print(f"\tNGFF dims: {z_img._ome_ngff_multiscale_dims()}")
         print(f"\tshader params: {json.dumps(z_img.neuroglancer_shader_parameters())}")
-    return
